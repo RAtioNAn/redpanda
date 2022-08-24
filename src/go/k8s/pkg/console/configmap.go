@@ -135,11 +135,112 @@ func (cm *ConfigMap) generateConsoleConfig(
 	}
 	consoleConfig.Connect = *connectConfig
 
+	licenseConfig, err := cm.genLicense(ctx)
+	if err != nil {
+		return "", err
+	}
+	consoleConfig.License = licenseConfig
+
+	// Enterprise features
+	loginConfig, err := cm.genLogin(ctx)
+	if err != nil {
+		return "", err
+	}
+	if loginConfig != nil {
+		consoleConfig.Login = *loginConfig
+	}
+
+	enterpriseConfig := cm.genEnterprise()
+	if enterpriseConfig != nil {
+		consoleConfig.Enterprise = *enterpriseConfig
+	}
+
 	config, err := yaml.Marshal(consoleConfig)
 	if err != nil {
 		return "", err
 	}
 	return string(config), nil
+}
+
+func (cm *ConfigMap) genEnterprise() *Enterprise {
+	if enterprise := cm.consoleobj.Spec.Enterprise; enterprise != nil {
+		return &Enterprise{
+			RBAC: EnterpriseRBAC{
+				Enabled:              cm.consoleobj.Spec.Enterprise.RBAC.Enabled,
+				RoleBindingsFilepath: fmt.Sprintf("%s/%s", enterpriseRBACMountPath, "rbac.yaml"),
+			},
+		}
+	}
+	return nil
+}
+
+var (
+	defaultLicenseSecretKey = "license"
+	defaultJWTSecretKey     = "jwt"
+)
+
+func (cm *ConfigMap) genLogin(ctx context.Context) (*EnterpriseLogin, error) {
+	if provider := cm.consoleobj.Spec.Login; provider != nil { // nolint:nestif // login config is complex
+		enterpriseLogin := &EnterpriseLogin{
+			Enabled: provider.Enabled,
+		}
+
+		jwtSecret, err := provider.JWTSecret.GetSecret(ctx, cm.Client)
+		if err != nil {
+			return nil, err
+		}
+		jwt, err := provider.JWTSecret.GetValue(jwtSecret, defaultJWTSecretKey)
+		if err != nil {
+			return nil, err
+		}
+		enterpriseLogin.JWTSecret = string(jwt)
+
+		switch { // nolint:gocritic // will support more providers
+		case provider.Google != nil:
+			cc := provider.Google.ClientCredentials
+			ccSecret, err := cc.GetSecret(ctx, cm.Client)
+			if err != nil {
+				return nil, err
+			}
+			clientID, err := cc.GetValue(ccSecret, "clientId")
+			if err != nil {
+				return nil, err
+			}
+			clientSecret, err := cc.GetValue(ccSecret, "clientSecret")
+			if err != nil {
+				return nil, err
+			}
+
+			enterpriseLogin.Google = &EnterpriseLoginGoogle{
+				Enabled:      provider.Google.Enabled,
+				ClientID:     string(clientID),
+				ClientSecret: string(clientSecret),
+			}
+			if dir := provider.Google.Directory; dir != nil {
+				enterpriseLogin.Google.Directory = &EnterpriseLoginGoogleDirectory{
+					ServiceAccountFilepath: fmt.Sprintf("%s/%s", enterpriseGoogleSAMountPath, "sa.json"),
+					TargetPrincipal:        provider.Google.Directory.TargetPrincipal,
+				}
+			}
+		}
+		return enterpriseLogin, nil
+	}
+	return nil, nil
+}
+
+func (cm *ConfigMap) genLicense(ctx context.Context) (string, error) {
+	if license := cm.consoleobj.Spec.License; license != nil {
+		licenseSecret, err := license.GetSecret(ctx, cm.Client)
+		if err != nil {
+			return "", err
+		}
+		licenseValue, err := license.GetValue(licenseSecret, defaultLicenseSecretKey)
+		if err != nil {
+			return "", err
+		}
+		return string(licenseValue), nil
+	}
+	return "", nil
 }
 
 func (cm *ConfigMap) genServer() rest.Config {
